@@ -53,3 +53,8 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+calc
+out/
+out_test/
+t_out/

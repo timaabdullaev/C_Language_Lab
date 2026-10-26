@@ -19,90 +19,142 @@ static void skip_spaces(const char **p) {
     }
 }
 
-// 1 on success, 0 on error, -1 on empty line
-int eval_line(const char *line, long long *result, size_t *err_pos) {
-    const char *p = line;
+// shared parser state so nested calls can report errors
+typedef struct {
+    const char *line;
+    const char *p;
+    size_t err_pos;
+} Parser;
+
+// no unary minus in spec so a number must start with a digit
+static int parse_primary(Parser *ps, long long *out) {
+    skip_spaces(&ps->p);
+    if (!isdigit((unsigned char)*ps->p)) {
+        ps->err_pos = (size_t)(ps->p - ps->line);
+        return 0;
+    }
     char *end;
-
-    skip_spaces(&p);
-    
-    if (*p == '\0') {
-        return -1; 
-    }
-
-    const char *num_start = p;
-    
-    // allow leading negative sign
-    if (*p == '-') {
-        p++;
-    }
-    
-    // strict digit check to block multiple operators
-    if (!isdigit((unsigned char)*p)) {
-        *err_pos = (size_t)(num_start - line);
-        return 0; 
-    }
-    p = num_start;
-
     errno = 0;
-    long long current_val = strtoll(p, &end, 10);
+    long long v = strtoll(ps->p, &end, 10);
     if (errno == ERANGE) {
-        *err_pos = (size_t)(num_start - line);
-        return 0; 
+        ps->err_pos = (size_t)(ps->p - ps->line);
+        return 0;
     }
-    p = end;
+    ps->p = end;
+    *out = v;
+    return 1;
+}
 
-    // process left to right
+// term is deeper than expr so * and / bind tighter than + and -
+static int parse_term(Parser *ps, long long *out) {
+    long long left;
+    if (!parse_primary(ps, &left)) {
+        return 0;
+    }
+
     while (1) {
-        skip_spaces(&p);
-        
-        if (*p == '\0') {
+        skip_spaces(&ps->p);
+        char op = *ps->p;
+        if (op != '*' && op != '/') {
             break;
         }
+        ps->p++;
+        skip_spaces(&ps->p);
 
-        char op = *p;
-        if (op != '+' && op != '-') {
-            *err_pos = (size_t)(p - line);
-            return 0; 
-        }
-        p++; 
-
-        skip_spaces(&p);
-        
-        num_start = p;
-        // block multiple or dangling operators
-        if (!isdigit((unsigned char)*p)) {
-            *err_pos = (size_t)(p - line);
+        // save start of right operand for div by zero error
+        size_t right_pos = (size_t)(ps->p - ps->line);
+        long long right;
+        if (!parse_primary(ps, &right)) {
             return 0;
         }
-        
-        errno = 0;
-        long long next_val = strtoll(p, &end, 10);
-        if (errno == ERANGE) {
-            *err_pos = (size_t)(num_start - line);
-            return 0; 
+
+        if (op == '/') {
+            if (right == 0) {
+                ps->err_pos = right_pos;
+                return 0;
+            }
+            // c truncates toward zero like spec says
+            left /= right;
+        } else {
+            // right is never negative here so one check is enough
+            if (right != 0 && left > LLONG_MAX / right) {
+                ps->err_pos = right_pos;
+                return 0;
+            }
+            left *= right;
         }
-        p = end;
+    }
+    *out = left;
+    return 1;
+}
+
+// loop keeps + and - left associative
+static int parse_expr(Parser *ps, long long *out) {
+    long long left;
+    if (!parse_term(ps, &left)) {
+        return 0;
+    }
+
+    while (1) {
+        skip_spaces(&ps->p);
+        char op = *ps->p;
+        if (op != '+' && op != '-') {
+            break;
+        }
+        ps->p++;
+        skip_spaces(&ps->p);
+
+        size_t right_pos = (size_t)(ps->p - ps->line);
+        long long right;
+        if (!parse_term(ps, &right)) {
+            return 0;
+        }
 
         // overflow checks
         if (op == '+') {
-            if ((next_val > 0 && current_val > LLONG_MAX - next_val) ||
-                (next_val < 0 && current_val < LLONG_MIN - next_val)) {
-                *err_pos = (size_t)(num_start - line);
-                return 0; 
+            if ((right > 0 && left > LLONG_MAX - right) ||
+                (right < 0 && left < LLONG_MIN - right)) {
+                ps->err_pos = right_pos;
+                return 0;
             }
-            current_val += next_val;
+            left += right;
         } else {
-            if ((next_val > 0 && current_val < LLONG_MIN + next_val) ||
-                (next_val < 0 && current_val > LLONG_MAX + next_val)) {
-                *err_pos = (size_t)(num_start - line);
-                return 0; 
+            if ((right > 0 && left < LLONG_MIN + right) ||
+                (right < 0 && left > LLONG_MAX + right)) {
+                ps->err_pos = right_pos;
+                return 0;
             }
-            current_val -= next_val;
+            left -= right;
         }
     }
+    *out = left;
+    return 1;
+}
 
-    *result = current_val;
+// 1 on success, 0 on error, -1 on empty line
+int eval_line(const char *line, long long *result, size_t *err_pos) {
+    Parser ps = { line, line, 0 };
+
+    skip_spaces(&ps.p);
+
+    if (*ps.p == '\0') {
+        return -1;
+    }
+
+    long long value;
+    if (!parse_expr(&ps, &value)) {
+        *err_pos = ps.err_pos;
+        return 0;
+    }
+
+    // leftover chars after a full expression are invalid
+    skip_spaces(&ps.p);
+    if (*ps.p != '\0') {
+        *err_pos = (size_t)(ps.p - line);
+        return 0;
+    }
+
+    *result = value;
     return 1;
 }
 
@@ -170,7 +222,19 @@ int main(int argc, char *argv[]) {
         } else if (status == 0) {
             // calc 1-based global error pos
             size_t error_pos = global_offset + err_pos + 1;
+
+            // reopen in w mode to wipe partial results, only the error stays
+            fclose(out_file);
+            out_file = fopen(out_path, "w");
+            if (!out_file) {
+                fprintf(stderr, "Error opening output file\n");
+                fclose(in_file);
+                return 1;
+            }
             fprintf(out_file, "ERROR:%zu\n", error_pos);
+
+            // only the first error counts
+            break;
         }
         
         global_offset += len;
