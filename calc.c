@@ -26,12 +26,15 @@ typedef struct {
     size_t err_pos;
 } Parser;
 
+static int parse_power(Parser *ps, long long *out);
+
 // needed because primary calls expr for parentheses
 static int parse_expr(Parser *ps, long long *out);
+
 // no unary minus in spec so a number must start with a digit
 static int parse_primary(Parser *ps, long long *out) {
     skip_spaces(&ps->p);
-        if (*ps->p == '(') {
+    if (*ps->p == '(') {
         ps->p++;
         if (!parse_expr(ps, out)) {
             return 0;
@@ -62,17 +65,53 @@ static int parse_primary(Parser *ps, long long *out) {
     return 1;
 }
 
+static int parse_power(Parser *ps, long long *out) {
+    long long base;
+    if (!parse_primary(ps, &base)) {
+        return 0;
+    }
+    
+    skip_spaces(&ps->p);
+    if (*ps->p == '*' && *(ps->p + 1) == '*') {
+        ps->p += 2;
+        skip_spaces(&ps->p);
+        
+        size_t exp_pos = (size_t)(ps->p - ps->line);
+        long long exp_val;
+        if (!parse_power(ps, &exp_val)) {
+            return 0;
+        }
+        // negative exponent error
+        if (exp_val < 0) {
+            ps->err_pos = exp_pos;
+            return 0;
+        }
+        long long result = 1;
+        for (long long i = 0; i < exp_val; i++) {
+            result *= base;
+        }
+        *out = result;
+    } else {
+        *out = base;
+    }
+    return 1;
+}
+
 // term is deeper than expr so * and / bind tighter than + and -
 static int parse_term(Parser *ps, long long *out) {
     long long left;
-    if (!parse_primary(ps, &left)) {
+    if (!parse_power(ps, &left)) {
         return 0;
     }
 
     while (1) {
         skip_spaces(&ps->p);
         char op = *ps->p;
+        // avoid clash with power operator **
         if (op != '*' && op != '/') {
+            break;
+        }
+        if (op == '*' && *(ps->p + 1) == '*') {
             break;
         }
         ps->p++;
@@ -81,7 +120,7 @@ static int parse_term(Parser *ps, long long *out) {
         // save start of right operand for div by zero error
         size_t right_pos = (size_t)(ps->p - ps->line);
         long long right;
-        if (!parse_primary(ps, &right)) {
+        if (!parse_power(ps, &right)) {
             return 0;
         }
 
@@ -149,7 +188,8 @@ int eval_line(const char *line, long long *result, size_t *err_pos) {
 
     skip_spaces(&ps.p);
 
-    if (*ps.p == '\0') {
+    // ignore empty lines and comment lines starting with #
+    if (*ps.p == '\0' || *ps.p == '#') {
         return -1;
     }
 
@@ -219,7 +259,7 @@ int main(int argc, char *argv[]) {
     size_t global_offset = 0;
     char line[1024];
 
-        while (fgets(line, sizeof(line), in_file)) {
+    while (fgets(line, sizeof(line), in_file)) {
         
         size_t len = strlen(line);
         
