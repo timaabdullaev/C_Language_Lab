@@ -26,9 +26,26 @@ typedef struct {
     size_t err_pos;
 } Parser;
 
+// needed because primary calls expr for parentheses
+static int parse_expr(Parser *ps, long long *out);
 // no unary minus in spec so a number must start with a digit
 static int parse_primary(Parser *ps, long long *out) {
     skip_spaces(&ps->p);
+        if (*ps->p == '(') {
+        ps->p++;
+        if (!parse_expr(ps, out)) {
+            return 0;
+        }
+        skip_spaces(&ps->p);
+        // missing ) is reported where the parser stopped, end of line included
+        if (*ps->p != ')') {
+            ps->err_pos = (size_t)(ps->p - ps->line);
+            return 0;
+        }
+        ps->p++;
+        return 1;
+    }
+    
     if (!isdigit((unsigned char)*ps->p)) {
         ps->err_pos = (size_t)(ps->p - ps->line);
         return 0;
@@ -76,11 +93,6 @@ static int parse_term(Parser *ps, long long *out) {
             // c truncates toward zero like spec says
             left /= right;
         } else {
-            // right is never negative here so one check is enough
-            if (right != 0 && left > LLONG_MAX / right) {
-                ps->err_pos = right_pos;
-                return 0;
-            }
             left *= right;
         }
     }
@@ -207,7 +219,7 @@ int main(int argc, char *argv[]) {
     size_t global_offset = 0;
     char line[1024];
 
-    while (fgets(line, sizeof(line), in_file)) {
+        while (fgets(line, sizeof(line), in_file)) {
         
         size_t len = strlen(line);
         
@@ -238,8 +250,8 @@ int main(int argc, char *argv[]) {
         }
         
         global_offset += len;
-    }
 
+    }
     fclose(in_file);
     fclose(out_file);
 
